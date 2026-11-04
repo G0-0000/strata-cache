@@ -130,6 +130,36 @@ def test_budget_and_slot_cap_can_bite_together() -> None:
     assert decision.reasons == {"a": "over_budget", "b": "over_budget"}
 
 
+def test_zero_byte_budget_keeps_nothing_but_pinned() -> None:
+    entries = [entry("a", 10, 0), entry("pin", 10, 1, pinned=True)]
+    decision = run(entries, budget_bytes=0)
+    # Every unpinned entry is larger than a zero budget: written then deleted,
+    # and no eviction of anybody else.
+    assert decision.written_then_deleted == ("a",)
+    assert decision.victims == ()
+    assert decision.kept == ("pin",)
+    assert any("pinned entries alone" in warning for warning in decision.warnings)
+
+
+def test_zero_byte_budget_with_only_zero_token_entries() -> None:
+    entries = [entry("empty-1", 0), entry("empty-2", 0)]
+    decision = run(entries, budget_bytes=0, slots=1)
+    assert decision.written_then_deleted == ()
+    assert decision.victims == ("empty-1",)
+    assert decision.reasons == {"empty-1": "over_slots"}
+    assert decision.kept == ("empty-2",)
+
+
+def test_zero_slots_evicts_every_unpinned_entry() -> None:
+    entries = [entry("a", 1, 0), entry("b", 1, 1), entry("pin", 1, 2, pinned=True)]
+    decision = run(entries, budget_bytes=1_000_000, slots=0)
+    assert decision.victims == ("a", "b")
+    assert decision.reasons == {"a": "over_slots", "b": "over_slots"}
+    assert decision.kept == ("pin",)
+    assert decision.kept_count == 1
+    assert any("over the 0-slot cap" in warning for warning in decision.warnings)
+
+
 def test_decision_is_stable_across_runs() -> None:
     entries = [entry(f"c{i}", 10, i % 3) for i in range(6)]
     first = run(entries, budget_bytes=3000)

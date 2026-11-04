@@ -7,11 +7,15 @@ After=default.target
 Type=simple
 # Placeholder: replace with the installed console script, or with
 #   %h/.local/bin/python -m strata_cache_plugin.cli
-# once the package is installed. The socket directory is created 0700 by the
-# server itself; %t is /run/user/<uid> under a user manager.
+# once the package is installed.
 ExecStart=%h/.local/bin/strata-cache-plugin serve --socket %t/strata-cache-plugin/cache.sock
 Restart=on-failure
 RestartSec=2s
+
+# systemd creates %t/strata-cache-plugin 0700 before ExecStart, so both the
+# socket path and the ReadWritePaths entry below name a directory that exists.
+RuntimeDirectory=strata-cache-plugin
+RuntimeDirectoryMode=0700
 
 # P1 does not write to the cache, but it also has no reason to write anywhere.
 NoNewPrivileges=yes

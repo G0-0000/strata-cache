@@ -18,9 +18,24 @@ from pathlib import Path
 
 import pytest
 
+from strata_cache_plugin import cli, socket_server
+
 SRC = Path(__file__).resolve().parents[1] / "src"
 READY_TIMEOUT_S = 15.0
 QUIET_TIMEOUT_S = 0.75
+
+
+def manifest(root: Path) -> list[tuple[str, int, int, int]]:
+    """Every entry below *root*: relative path, size, mtime_ns, mode."""
+    rows: list[tuple[str, int, int, int]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in sorted(dirnames) + sorted(filenames):
+            path = Path(dirpath) / name
+            info = path.lstat()
+            rows.append(
+                (str(path.relative_to(root)), info.st_size, info.st_mtime_ns, info.st_mode)
+            )
+    return sorted(rows)
 
 
 def free_socket_dir(tmp_path: Path) -> Path:
@@ -79,6 +94,21 @@ class Server:
                 last = exc
             time.sleep(0.02)
         raise AssertionError(f"server never became ready ({last}): {self.stderr_text()}")
+
+    def wait_listening(self, timeout: float = READY_TIMEOUT_S) -> None:
+        """Block until the socket accepts a connection, whatever it then answers."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                raise AssertionError(
+                    f"server exited with {self.proc.returncode}: {self.stderr_text()}"
+                )
+            try:
+                with connect(self.socket_path):
+                    return
+            except OSError:
+                time.sleep(0.02)
+        raise AssertionError(f"socket never appeared: {self.stderr_text()}")
 
     def terminate(self) -> None:
         if self.proc.poll() is None:
@@ -365,6 +395,133 @@ def test_sigterm_with_a_hung_client_exits_cleanly(tmp_path: Path) -> None:
             hung.close()
     finally:
         running.close()
+
+
+def test_deeply_nested_json_does_not_kill_the_server(server: Server) -> None:
+    epoch = server.wait_ready()
+    with connect(server.socket_path) as conn:
+        conn.sendall(b"[" * 2000 + b"]" * 2000 + b"\n")
+        reply = read_line(conn)
+        assert reply["ok"] is False
+        # 2000 levels still parse on CPython 3.12, so this is "not an object";
+        # a build that recurses earlier answers bad_json. Either way: an error.
+        assert reply["error"]["code"] in {"bad_json", "bad_request"}
+        assert reply["id"] is None
+
+        after = exchange(conn, {"id": "1", "op": "hello"})
+        assert after["ok"] is True
+        assert after["result"]["epoch"] == epoch
+
+
+def test_nesting_past_the_interpreter_limit_is_bad_json(server: Server) -> None:
+    epoch = server.wait_ready()
+    with connect(server.socket_path) as conn:
+        # 20000 levels raise RecursionError inside json.loads.
+        conn.sendall(b"[" * 20000 + b"]" * 20000 + b"\n")
+        reply = read_line(conn)
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == "bad_json"
+        assert "RecursionError" in reply["error"]["message"]
+
+        after = exchange(conn, {"id": "1", "op": "hello"})
+        assert after["ok"] is True
+        assert after["result"]["epoch"] == epoch
+
+
+def test_integer_literal_past_the_conversion_limit_is_bad_json(server: Server) -> None:
+    epoch = server.wait_ready()
+    line = b'{"id":"big","n":' + b"1" * 5000 + b"}"
+    with connect(server.socket_path) as conn:
+        conn.sendall(line + b"\n")
+        reply = read_line(conn)
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == "bad_json"
+        assert reply["id"] is None
+
+        after = exchange(conn, {"id": "1", "op": "hello"})
+        assert after["ok"] is True
+        assert after["result"]["epoch"] == epoch
+
+
+def test_oversized_line_with_newline_in_the_same_chunk(tmp_path: Path) -> None:
+    """The cap must hold even when the newline arrives with the overflow."""
+    with Server(free_socket_dir(tmp_path), "--max-request-bytes", "64") as running:
+        with connect(running.socket_path) as conn:
+            conn.sendall(b'{"id":"x","op":"hello","pad":"')  # 28 bytes, no newline
+            conn.sendall(b"a" * 100 + b'"}' + b"\n")  # newline lands with the overflow
+            reply = read_line(conn)
+            assert reply["ok"] is False
+            assert reply["error"]["code"] == "request_too_large"
+
+        with connect(running.socket_path) as conn:
+            assert exchange(conn, {"id": "1", "op": "hello"})["ok"] is True
+
+
+def test_peer_credentials_are_enforced(tmp_path: Path) -> None:
+    """A uid that is not allowed gets one rejection, then nothing."""
+    running = Server(free_socket_dir(tmp_path), "--allow-uid", "4242424")
+    try:
+        running.wait_listening()
+        with connect(running.socket_path) as conn:
+            reply = read_line(conn)
+            assert reply["ok"] is False
+            assert reply["error"]["code"] == "peer_rejected"
+            assert reply["id"] is None
+            assert conn.recv(65536) == b""  # disconnected after the single reply
+    finally:
+        running.close()
+
+
+def test_socket_path_in_a_protected_root_is_refused(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for path in (
+        "/models/strata-cache-plugin/cache.sock",
+        "/home/g0/strata-v100/run/cache.sock",
+    ):
+        server = socket_server.SocketServer(path)  # constructing touches nothing
+        with pytest.raises(socket_server.ServerError, match="protected root"):
+            server.start()
+        assert server._listener is None
+        assert cli.main(["serve", "--socket", path]) == cli.EXIT_ERROR
+    assert "protected root" in capsys.readouterr().err
+
+
+def test_scan_depth_above_the_server_cap_is_refused(server: Server, tmp_path: Path) -> None:
+    epoch = server.wait_ready()
+    with connect(server.socket_path) as conn:
+        too_deep = exchange(
+            conn,
+            {"id": "d", "op": "scan", "epoch": epoch, "dir": str(tmp_path), "max_depth": 3},
+        )
+        assert too_deep["ok"] is False
+        assert too_deep["error"]["code"] == "refused_by_policy"
+        assert "cap" in too_deep["error"]["message"]
+
+        at_cap = exchange(
+            conn,
+            {"id": "d2", "op": "scan", "epoch": epoch, "dir": str(tmp_path), "max_depth": 1},
+        )
+        assert at_cap["ok"] is True
+
+        zero = exchange(
+            conn,
+            {"id": "d3", "op": "scan", "epoch": epoch, "dir": str(tmp_path), "max_depth": 0},
+        )
+        assert zero["error"]["code"] == "scan_failed"
+
+
+def test_scanning_a_live_socket_directory_changes_nothing(server: Server) -> None:
+    epoch = server.wait_ready()
+    socket_dir = server.socket_path.parent
+    before = manifest(socket_dir)
+    with connect(server.socket_path) as conn:
+        reply = exchange(
+            conn, {"id": "s", "op": "scan", "epoch": epoch, "dir": str(socket_dir)}
+        )
+        assert reply["ok"] is True
+        assert any(entry["name"] == "cache.sock" for entry in reply["result"]["entries"])
+    assert manifest(socket_dir) == before
 
 
 def test_live_server_is_not_replaced(tmp_path: Path) -> None:

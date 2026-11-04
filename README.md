@@ -18,7 +18,17 @@ skeleton, a scanner, a dry-run policy engine and a wire protocol.
 - `serve` exposes the same work over a Unix socket with newline-delimited JSON
   (see [PROTOCOL.md](PROTOCOL.md)).
 
-Every filesystem call in `scan` is `os.scandir` or `lstat`. No file is opened.
+Every filesystem call in `scan` is `os.scandir`, `lstat`, or one `os.stat` of
+the directory the caller named. No file is ever opened.
+
+Precisely what is followed:
+
+- the **root argument** is opened with `os.stat`, so a symlink given as `--dir`
+  is followed to the directory it points at;
+- every **entry inside** it is `lstat`-ed with `follow_symlinks=False`, so
+  symlinks are reported as symlinks and never followed;
+- nothing is resolved on the way to a protected-root decision: that check is
+  lexical, see below.
 
 ## What P1 explicitly does not do
 
@@ -28,10 +38,14 @@ Every filesystem call in `scan` is `os.scandir` or `lstat`. No file is opened.
   directory. Temporary files are reported and left alone.
 - It does not read snapshot bytes, over the socket or anywhere else. Byte
   transfer is not part of the protocol, not even as a future option in v0.
-- It does not touch `/models` or any Strata production path. `scan --dir` refuses
-  a protected root unless `--allow-production-readonly` is passed, and even then
-  it only stats. The check is lexical: it never resolves symlinks, because
-  resolving a protected root would itself be a filesystem call on it.
+- It does not touch `/models` or any Strata checkout. Protected paths are
+  `/models` (that root and everything below it) and `/home/g0/strata*` (every
+  `strata` worktree, patch tree and the plugin's own symlink). Refused for
+  `scan --dir` (unless `--allow-production-readonly`, and even then stat only),
+  for `dry-run --fixture`, and for `--socket`, where a 0700 directory inside a
+  protected root would otherwise accept a socket write. The check is lexical: it
+  never resolves symlinks, because resolving a protected root would itself be a
+  filesystem call on it.
 - It does not talk to the running engine, take a lease, or hold a lock.
 - It does not install or enable a systemd unit. `systemd/*.service` is a
   documented example with placeholder paths.
@@ -67,7 +81,8 @@ strata-cache-plugin scan --dir /path/to/cache --json   # aggregates plus every e
 strata-cache-plugin scan --dir /path/to/cache --max-depth 2
 ```
 
-The protected root `/models` is refused without `--allow-production-readonly`.
+The protected roots (`/models`, `/home/g0/strata*`) are refused without
+`--allow-production-readonly`; even then the scan is stat only.
 
 ### dry-run
 
@@ -98,6 +113,12 @@ Rules, mirroring the engine:
 - entry size is `tokens x --bytes-per-token` (default 15260, a placeholder cost
   model; P1 does not measure).
 
+Where this does not match the engine: the engine's spill pass skips entries that
+are complete and already have a chain (`conversation_spill.cpp:1317-1318`), so
+its FIFO order starts from a filtered list while P1's starts from the fixture as
+given. A `--fifo` victim list can therefore differ from the engine's. Delta mode
+(LRU) has no such filter.
+
 `--budget-bytes` is required: the tool will not invent a budget for you.
 
 ### serve
@@ -108,11 +129,14 @@ strata-cache-plugin serve --socket /run/user/$(id -u)/strata-cache-plugin/cache.
 
 The socket directory must be private (`0700`). The server creates it if it is
 missing; it refuses to chmod a directory it did not create, so pointing
-`--socket` at `/tmp` fails loudly instead of quietly locking down `/tmp`.
+`--socket` at `/tmp` fails loudly instead of quietly locking down `/tmp`. A
+socket path inside a protected root is refused before anything is created.
 
 Requests must carry the owner epoch returned by `hello`. `lease_read` answers
-`not_implemented` in P1. `scan` requests need an explicit `dir`, refused for
-`/models` unless the server was started with `--allow-production-readonly`.
+`not_implemented` in P1. `scan` requests need an explicit `dir`, refused for a
+protected root unless the server was started with
+`--allow-production-readonly`; a requested `max_depth` above the server's
+`--scan-max-depth` is an error, not a silent deep scan.
 
 ## Tests
 
@@ -121,12 +145,15 @@ python3 -m pytest            # from the repository root
 ```
 
 The suite covers: classification and aggregates, a full `(name, size, mtime,
-mode)` manifest compared before and after a scan (nothing may change), a scan
-run with `builtins.open` patched to raise, LRU against FIFO ordering, prefix
-last, pinned kept, single oversize entry, the slot cap, the epoch guard, serial
-handling of a second connection, a client that disconnects mid-line, `SIGKILL`
-followed by a restart on the same socket, and a hung client followed by a clean
-`SIGTERM`.
+mode)` manifest compared before and after a scan (nothing may change, including
+in a directory holding a live socket), a scan run with `builtins.open` patched
+to raise, LRU against FIFO ordering, prefix last, pinned kept, single oversize
+entry, the slot cap, a zero byte budget and zero slots, the epoch guard,
+`SO_PEERCRED` rejection, malformed JSON that would otherwise raise
+`RecursionError` or `ValueError`, an oversized line crossing a read boundary,
+serial handling of a second connection, a client that disconnects mid-line,
+`SIGKILL` followed by a restart on the same socket, and a hung client followed
+by a clean `SIGTERM`.
 
 ## P1 limits, on purpose
 
@@ -135,3 +162,5 @@ followed by a restart on the same socket, and a hung client followed by a clean
 - The protected-root check is lexical, so a symlink pointing into `/models` is
   not caught. P1 only scans directories the operator names.
 - The cost model is a constant, not a measurement.
+- `--fifo` order does not model the engine's skip of complete entries that
+  already have a chain, so its victims can differ; see the dry-run section.

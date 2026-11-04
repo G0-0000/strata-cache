@@ -19,8 +19,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 #: Directories this tool refuses to scan unless the caller opts in explicitly,
-#: and even then with ``stat`` only. Matched lexically, never by resolving.
+#: and even then with ``stat`` only. A root matches itself and everything below
+#: it. Matched lexically, never by resolving.
 PROTECTED_ROOTS: tuple[str, ...] = ("/models",)
+
+#: Prefixes that are protected as a whole family: every Strata checkout,
+#: worktree and build under the operator's home, not just one directory. A
+#: prefix matches by plain string comparison, so ``strata`` covers
+#: ``strata``, ``strata-v100``, ``strata-patches`` and the plugin's own symlink.
+PROTECTED_PREFIXES: tuple[str, ...] = ("/home/g0/strata",)
 
 #: Artifact suffixes the Strata cache writes. Longest first: ``.tokens.json``
 #: ends with ``.json``, so a suffix is only ever claimed by one entry here.
@@ -68,6 +75,9 @@ def is_protected_path(path: str | os.PathLike[str]) -> bool:
     candidate = lexical_path(path)
     for root in PROTECTED_ROOTS:
         if candidate == root or candidate.startswith(root + os.sep):
+            return True
+    for prefix in PROTECTED_PREFIXES:
+        if candidate.startswith(prefix):
             return True
     return False
 

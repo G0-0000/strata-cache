@@ -14,7 +14,9 @@ real; `lease_read` is reserved and **not used in P1**.
   object per line in each direction. No length prefix, no batching, no
   framing beyond `\n`.
 - **Transport**: `AF_UNIX`, `SOCK_STREAM`, at a path the operator chooses. The
-  socket directory must be `0700`; the socket file is created `0600`.
+  socket directory must be `0700`; the socket file is created `0600`. A socket
+  path inside a protected root is refused before a directory or a socket is
+  created there.
 - **Peer check**: `SO_PEERCRED` on connect. A peer whose uid is not the server's
   own uid (`--allow-uid` can widen this) receives one `peer_rejected` reply and
   is disconnected.
@@ -112,9 +114,12 @@ a read or a release idempotent; it will still never carry bytes.
 ```
 
 `dir` is required - the server has no default directory and will not guess. A
-protected root (`/models`) is refused with `refused_by_policy` unless the server
-was started with `--allow-production-readonly`; even then the scan is `stat`
-only and opens nothing. `max_depth` defaults to the server's `--scan-max-depth`.
+protected path (`/models`, and any `/home/g0/strata*` tree) is refused with
+`refused_by_policy` unless the server was started with
+`--allow-production-readonly`; even then the scan is `stat` only and opens
+nothing. `max_depth` defaults to the server's `--scan-max-depth`, which is a
+**cap**: a request asking for more than the cap is refused with
+`refused_by_policy` rather than quietly walked as deeply as asked.
 
 The result is the scanner report: `root`, `max_depth`, `entry_count`,
 `file_count`, `directory_count`, `symlink_count`, `temporary_count`,
@@ -174,16 +179,16 @@ Accepts `lease_id` and answers success without touching anything:
 
 | code | Meaning |
 |------|---------|
-| `bad_json` | The line is not UTF-8 or not valid JSON. `id` is `null`. |
+| `bad_json` | The line is not UTF-8, is not parseable JSON, nests deeper than the interpreter will parse (`RecursionError`), or holds an integer literal past the 4300-digit conversion limit (`ValueError`). `id` is `null`. |
 | `bad_request` | Decoded, but not an object, or `id`/`op` missing or of the wrong type. |
 | `unknown_op` | `op` is not one of the operations above. |
 | `epoch_mismatch` | `epoch` missing or not the current server's epoch. |
 | `peer_rejected` | `SO_PEERCRED` uid is not allowed. One reply, then disconnect. |
-| `refused_by_policy` | The request would touch a protected root. |
-| `scan_failed` | The scan could not complete: missing path, not a directory, unreadable entry. |
+| `refused_by_policy` | The request would touch a protected path, or asks for a scan depth above the server cap. |
+| `scan_failed` | The scan could not complete: missing path, not a directory, unreadable entry, bad `max_depth`. |
 | `policy_error` | The dry-run input is invalid: unknown field, duplicate name, bad number. |
 | `not_implemented` | Reserved operation called too early (`lease_read`). |
-| `request_too_large` | A single line exceeded `--max-request-bytes` (default 1 MiB), then disconnect. |
+| `request_too_large` | A single line exceeded `--max-request-bytes` (default 1 MiB), including a line whose newline arrives in the same read as the overflow, then disconnect. |
 | `internal_error` | Anything unexpected. The connection stays open; the server stays up. |
 
 An error never closes the connection, except `peer_rejected` and

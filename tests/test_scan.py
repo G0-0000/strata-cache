@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from strata_cache_plugin import scan
+from strata_cache_plugin import cli, scan
 
 ARTIFACTS = {
     "alpha.sess": b"a" * 10,
@@ -186,10 +187,56 @@ def test_bad_depth_raises(tmp_path: Path) -> None:
         ("/modelsX", False),
         ("/var/lib/models", False),
         ("/home/g0/models", False),
+        ("/home/g0/strata", True),
+        ("/home/g0/strata-v100", True),
+        ("/home/g0/strata-v100/src/strata.hpp", True),
+        ("/home/g0/strata-cache-plugin/tests", True),
+        ("/home/g0/strataX", True),
+        ("/home/g0/other-repo", False),
     ],
 )
 def test_protected_paths(path: str, protected: bool) -> None:
     assert scan.is_protected_path(path) is protected
+
+
+def test_cli_refuses_a_protected_scan_dir(tmp_path: Path) -> None:
+    assert cli.main(["scan", "--dir", "/models"]) == cli.EXIT_REFUSED
+    assert cli.main(["scan", "--dir", "/home/g0/strata-v100/personal"]) == cli.EXIT_REFUSED
+
+
+def test_cli_refuses_a_protected_fixture(tmp_path: Path) -> None:
+    # Refused before the path is opened, so a nonexistent fixture is enough.
+    code = cli.main(
+        ["dry-run", "--fixture", "/home/g0/strata-v100/entries.json", "--budget-bytes", "10"]
+    )
+    assert code == cli.EXIT_REFUSED
+
+
+def test_cli_scan_works_on_a_temp_dir(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    build_fixture(tmp_path)
+    assert cli.main(["scan", "--dir", str(tmp_path)]) == cli.EXIT_OK
+    assert "temporaries: 3" in capsys.readouterr().out
+
+
+def test_cli_dry_run_reports_victims(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    fixture = tmp_path / "entries.json"
+    fixture.write_text(
+        json.dumps(
+            [
+                {"name": "old", "tokens": 10, "last_used": 0},
+                {"name": "new", "tokens": 10, "last_used": 5},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    code = cli.main(
+        ["dry-run", "--fixture", str(fixture), "--budget-bytes", "1000",
+         "--bytes-per-token", "100", "--json"]
+    )
+    assert code == cli.EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["victims"] == ["old"]
+    assert payload["kept"] == ["new"]
 
 
 def test_report_serialises(tmp_path: Path) -> None:

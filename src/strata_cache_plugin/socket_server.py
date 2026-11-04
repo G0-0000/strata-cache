@@ -102,6 +102,11 @@ class SocketServer:
             raise ServerError("server is already started")
         if not hasattr(socket, "SO_PEERCRED"):
             raise ServerError("SO_PEERCRED is unavailable on this platform; P1 refuses to run")
+        if scan.is_protected_path(self.socket_path):
+            raise ServerError(
+                f"refusing to create a socket at {self.socket_path}:"
+                " it lies inside a protected root"
+            )
         self._prepare_directory()
         self._clear_stale_socket()
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -249,7 +254,26 @@ class SocketServer:
                 # Client is gone. A half-written line is simply dropped.
                 return
             buffer += chunk
-            if b"\n" not in buffer and len(buffer) > self.max_request_bytes:
+            while b"\n" in buffer:
+                raw, _, buffer = buffer.partition(b"\n")
+                if len(raw) > self.max_request_bytes:
+                    # The newline arrived in the same chunk as the overflow, so the
+                    # early check below cannot see it: enforce the cap here too.
+                    self._counters["errors_total"] += 1
+                    self._send(
+                        connection,
+                        _error_envelope(
+                            None,
+                            ERROR_REQUEST_TOO_LARGE,
+                            f"request line exceeds {self.max_request_bytes} bytes",
+                        ),
+                    )
+                    return
+                reply = self.handle_line(raw)
+                if not self._send(connection, reply):
+                    return
+            if len(buffer) > self.max_request_bytes:
+                # A partial line with no newline yet is already too long.
                 self._counters["errors_total"] += 1
                 self._send(
                     connection,
@@ -260,11 +284,6 @@ class SocketServer:
                     ),
                 )
                 return
-            while b"\n" in buffer:
-                raw, _, buffer = buffer.partition(b"\n")
-                reply = self.handle_line(raw)
-                if not self._send(connection, reply):
-                    return
 
     def handle_line(self, raw: bytes) -> dict[str, Any]:
         """Turn one request line into one reply envelope. Never raises."""
@@ -278,6 +297,12 @@ class SocketServer:
             request = json.loads(text)
         except json.JSONDecodeError as exc:
             return self._error_reply(None, ERROR_BAD_JSON, f"cannot parse JSON: {exc.msg}")
+        except (ValueError, RecursionError) as exc:
+            # ValueError: an integer literal over the 4300-digit conversion limit.
+            # RecursionError: nesting deeper than the interpreter will parse.
+            return self._error_reply(
+                None, ERROR_BAD_JSON, f"cannot parse JSON: {type(exc).__name__}: {str(exc)[:200]}"
+            )
         if not isinstance(request, Mapping):
             return self._error_reply(None, ERROR_BAD_REQUEST, "request must be a JSON object")
         return self.handle_request(request)
@@ -370,6 +395,13 @@ class SocketServer:
         max_depth = request.get("max_depth", self.scan_max_depth)
         if isinstance(max_depth, bool) or not isinstance(max_depth, int):
             raise scan.ScanError("max_depth must be an integer")
+        if max_depth < 1:
+            raise scan.ScanError("max_depth must be >= 1")
+        if max_depth > self.scan_max_depth:
+            raise RefusedByPolicy(
+                f"max_depth {max_depth} exceeds the server cap {self.scan_max_depth};"
+                " the cap is a limit, not a default"
+            )
         return scan.scan_directory(directory, max_depth=max_depth).to_dict()
 
     def _op_stats(self) -> dict[str, Any]:
