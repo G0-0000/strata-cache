@@ -1,0 +1,24 @@
+[Unit]
+Description=Strata cache plugin (P1 read-only shadow)
+Documentation=file:///home/g0/strata-cache-plugin/PROTOCOL.md
+After=default.target
+
+[Service]
+Type=simple
+# Placeholder: replace with the installed console script, or with
+#   %h/.local/bin/python -m strata_cache_plugin.cli
+# once the package is installed. The socket directory is created 0700 by the
+# server itself; %t is /run/user/<uid> under a user manager.
+ExecStart=%h/.local/bin/strata-cache-plugin serve --socket %t/strata-cache-plugin/cache.sock
+Restart=on-failure
+RestartSec=2s
+
+# P1 does not write to the cache, but it also has no reason to write anywhere.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/strata-cache-plugin
+
+# There is no [Install] section on purpose: this unit is documented, not
+# installed and not enabled. `systemctl --user enable` therefore fails.
