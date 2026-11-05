@@ -1,8 +1,9 @@
 """Command line: ``strata-cache-plugin {scan,dry-run,serve}``.
 
-P1 entry points. Nothing here writes, renames or deletes anything; ``scan``
-refuses the protected cache root unless the caller opts in, and even then it
-only stats.
+``scan`` and ``dry-run`` are read-only and never touch a file: ``scan`` refuses
+the protected cache root unless the caller opts in, and even then it only
+stats. ``serve`` writes, but only inside the directories it was given with
+``--disk-dir`` and ``--slot-dir``, and only when a request names a file.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import sys
 from typing import Any, Sequence
 
 from . import PROTOCOL_VERSION, __version__
-from . import policy, scan, socket_server
+from . import policy, scan, socket_server, store_v1
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -28,9 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="strata-cache-plugin",
         description=(
-            "External cache plugin for Strata - P1 read-only shadow."
-            " It reports what a cache directory holds and what an eviction policy"
-            " would do. It never opens, writes, renames or deletes cache files."
+            "External cache plugin for Strata."
+            " It reports what a cache directory holds, predicts what an eviction"
+            " policy would do, and serves descriptors so the engine moves its own"
+            " bytes. Artifact contents are never read or parsed here."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -111,6 +113,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow scan requests on protected roots such as /models; stat only",
     )
+    serve_parser.add_argument(
+        "--disk-dir",
+        default=None,
+        help="directory holding the spill artifacts the engine leases and writes;"
+        " without it the v1 store operations answer not_implemented",
+    )
+    serve_parser.add_argument(
+        "--slot-dir",
+        default=None,
+        help="optional second directory (session files) the store also lists,"
+        " stats and removes; it is never written to",
+    )
+    serve_parser.add_argument(
+        "--lease-ttl-s",
+        type=float,
+        default=store_v1.LEASE_TTL_S,
+        help="lease lifetime in seconds, and the lifetime of a notification count"
+        " (default %(default)s)",
+    )
+    serve_parser.add_argument(
+        "--grace-s",
+        type=float,
+        default=store_v1.GRACE_S,
+        help="how long an entry with no known lease is spared by eviction"
+        " (default %(default)s)",
+    )
     serve_parser.set_defaults(handler=cmd_serve)
     return parser
 
@@ -156,10 +184,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
         allowed_uids=set(args.allow_uid) if args.allow_uid else None,
         max_request_bytes=args.max_request_bytes,
         scan_max_depth=args.scan_max_depth,
+        disk_dir=args.disk_dir,
+        slot_dir=args.slot_dir,
+        lease_ttl_s=args.lease_ttl_s,
+        grace_s=args.grace_s,
+    )
+    store_note = (
+        f" disk_dir={server.store.disk_dir} slot_dir={server.store.slot_dir}"
+        f" grace_s={server.store.grace_s}"
+        if server.store is not None
+        else ""
     )
     print(
         f"starting strata-cache-plugin {__version__} protocol {PROTOCOL_VERSION}"
-        f" on {server.socket_path} epoch={server.epoch}",
+        f" on {server.socket_path} epoch={server.epoch}{store_note}",
         file=sys.stderr,
         flush=True,
     )

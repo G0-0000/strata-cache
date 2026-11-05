@@ -6,158 +6,28 @@ mean. Every test uses a private socket directory under ``tmp_path``.
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import socket
 import stat
-import subprocess
-import sys
-import time
 from pathlib import Path
 
 import pytest
 
 from strata_cache_plugin import cli, socket_server
 
-SRC = Path(__file__).resolve().parents[1] / "src"
-READY_TIMEOUT_S = 15.0
+from support import (  # noqa: E402 - plain module next to this test file
+    READY_TIMEOUT_S,
+    Server,
+    connect,
+    exchange,
+    free_socket_dir,
+    manifest,
+    read_line,
+    send,
+)
+
 QUIET_TIMEOUT_S = 0.75
-
-
-def manifest(root: Path) -> list[tuple[str, int, int, int]]:
-    """Every entry below *root*: relative path, size, mtime_ns, mode."""
-    rows: list[tuple[str, int, int, int]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        for name in sorted(dirnames) + sorted(filenames):
-            path = Path(dirpath) / name
-            info = path.lstat()
-            rows.append(
-                (str(path.relative_to(root)), info.st_size, info.st_mtime_ns, info.st_mode)
-            )
-    return sorted(rows)
-
-
-def free_socket_dir(tmp_path: Path) -> Path:
-    directory = tmp_path / "sock"
-    directory.mkdir(mode=0o700)
-    os.chmod(directory, 0o700)
-    return directory
-
-
-class Server:
-    """A ``serve`` subprocess, plus the stderr file that explains a failure."""
-
-    def __init__(self, socket_dir: Path, *args: str) -> None:
-        self.socket_path = socket_dir / "cache.sock"
-        self.stderr_path = socket_dir / "server.stderr"
-        self._stderr = open(self.stderr_path, "w+b")
-        env = dict(os.environ, PYTHONPATH=str(SRC))
-        self.proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "strata_cache_plugin.cli",
-                "serve",
-                "--socket",
-                str(self.socket_path),
-                *args,
-            ],
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=self._stderr,
-        )
-
-    def stderr_text(self) -> str:
-        try:
-            self._stderr.flush()
-            return self.stderr_path.read_text(errors="replace")
-        except OSError:
-            return ""
-
-    def wait_ready(self) -> str:
-        """Block until hello answers; return that server's epoch."""
-        deadline = time.monotonic() + READY_TIMEOUT_S
-        last: Exception | None = None
-        while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise AssertionError(
-                    f"server exited with {self.proc.returncode}: {self.stderr_text()}"
-                )
-            try:
-                with connect(self.socket_path) as conn:
-                    reply = exchange(conn, {"id": "ready", "op": "hello"})
-                if reply.get("ok") and reply["result"].get("protocol") == "v0":
-                    return reply["result"]["epoch"]
-            except (OSError, AssertionError) as exc:  # not up yet
-                last = exc
-            time.sleep(0.02)
-        raise AssertionError(f"server never became ready ({last}): {self.stderr_text()}")
-
-    def wait_listening(self, timeout: float = READY_TIMEOUT_S) -> None:
-        """Block until the socket accepts a connection, whatever it then answers."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise AssertionError(
-                    f"server exited with {self.proc.returncode}: {self.stderr_text()}"
-                )
-            try:
-                with connect(self.socket_path):
-                    return
-            except OSError:
-                time.sleep(0.02)
-        raise AssertionError(f"socket never appeared: {self.stderr_text()}")
-
-    def terminate(self) -> None:
-        if self.proc.poll() is None:
-            self.proc.terminate()
-        try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover - would be a real bug
-            self.proc.kill()
-            self.proc.wait(timeout=10)
-
-    def close(self) -> None:
-        if self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait(timeout=10)
-        self._stderr.close()
-
-    def __enter__(self) -> "Server":
-        self.wait_ready()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
-
-def connect(path: Path, timeout: float = 10.0) -> socket.socket:
-    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(timeout)
-    conn.connect(str(path))
-    return conn
-
-
-def send(conn: socket.socket, payload: dict[str, object]) -> None:
-    conn.sendall(json.dumps(payload).encode("utf-8") + b"\n")
-
-
-def read_line(conn: socket.socket) -> dict[str, object]:
-    buffer = b""
-    while b"\n" not in buffer:
-        chunk = conn.recv(65536)
-        if not chunk:
-            raise AssertionError("server closed the connection without a reply")
-        buffer += chunk
-    line, _, _ = buffer.partition(b"\n")
-    return json.loads(line.decode("utf-8"))
-
-
-def exchange(conn: socket.socket, payload: dict[str, object]) -> dict[str, object]:
-    send(conn, payload)
-    return read_line(conn)
 
 
 @pytest.fixture()
@@ -176,12 +46,12 @@ def test_hello_scan_and_stats(server: Server, tmp_path: Path) -> None:
     (cache_dir / "stray.txt").write_bytes(b"s")
 
     with connect(server.socket_path) as conn:
-        hello = exchange(conn, {"id": "1", "op": "hello"})
+        hello = exchange(conn, {"id": "1", "op": "hello", "protocol": 1})
         assert hello["ok"] is True
         assert hello["result"]["epoch"] == epoch
-        assert hello["result"]["protocol"] == "v0"
-        assert "lease_read" in hello["result"]["not_used_in_p1"]
-        assert "scan" in hello["result"]["capabilities"]
+        assert hello["result"]["protocol"] == 1
+        assert "lease_read" in hello["result"]["features"]
+        assert "scan" in hello["result"]["features"]
 
         reply = exchange(
             conn, {"id": "2", "op": "scan", "epoch": epoch, "dir": str(cache_dir)}
@@ -225,19 +95,27 @@ def test_bad_requests_do_not_kill_the_server(server: Server) -> None:
         assert broken["error"]["code"] == "bad_json"
         assert broken["id"] is None
 
-        no_id = exchange(conn, {"op": "stats", "epoch": epoch})
-        assert no_id["error"]["code"] == "bad_request"
+        # A line without an id is a notification: never answered, applied or not.
+        send(conn, {"op": "stats", "epoch": epoch})
+        conn.settimeout(QUIET_TIMEOUT_S)
+        with pytest.raises(socket.timeout):
+            conn.recv(65536)
+        conn.settimeout(10.0)
 
         unknown = exchange(conn, {"id": "u", "op": "nope", "epoch": epoch})
         assert unknown["error"]["code"] == "unknown_op"
 
-        lease = exchange(conn, {"id": "l", "op": "lease_read", "epoch": epoch})
+        # This server was started without --disk-dir, so the store ops cannot run.
+        lease = exchange(conn, {"id": "l", "op": "lease_read", "epoch": epoch, "name": "a.sess"})
         assert lease["error"]["code"] == "not_implemented"
+        assert "--disk-dir" in lease["error"]["message"]
 
-        release = exchange(conn, {"id": "r", "op": "release", "epoch": epoch,
-                                  "lease_id": "L-1"})
-        assert release["ok"] is True
-        assert release["result"]["released"] is False
+        release = exchange(conn, {"id": "r", "op": "release", "epoch": epoch, "lease": "L-1"})
+        assert release["error"]["code"] == "not_implemented"
+
+        hello = exchange(conn, {"id": "h", "op": "hello", "protocol": 1})
+        assert hello["ok"] is True
+        assert hello["result"]["disk_dir"] is None
 
         still_alive = exchange(conn, {"id": "a", "op": "stats", "epoch": epoch})
         assert still_alive["ok"] is True
@@ -290,7 +168,7 @@ def test_second_connection_is_served_only_after_the_first_finishes(server: Serve
     try:
         blocked = connect(server.socket_path)
         blocked.settimeout(QUIET_TIMEOUT_S)
-        send(blocked, {"id": "b", "op": "hello"})
+        send(blocked, {"id": "b", "op": "hello", "protocol": 1})
         with pytest.raises(socket.timeout):
             blocked.recv(65536)
 
@@ -311,7 +189,7 @@ def test_client_disconnect_mid_line_does_not_kill_the_server(server: Server) -> 
     partial.close()
 
     with connect(server.socket_path) as conn:
-        reply = exchange(conn, {"id": "1", "op": "hello"})
+        reply = exchange(conn, {"id": "1", "op": "hello", "protocol": 1})
         assert reply["ok"] is True
         assert reply["result"]["epoch"] == epoch
 
@@ -325,7 +203,7 @@ def test_oversized_line_is_rejected_then_connection_dropped(tmp_path: Path) -> N
             assert reply["error"]["code"] == "request_too_large"
         # The server is still alive for the next client.
         with connect(running.socket_path) as conn:
-            assert exchange(conn, {"id": "1", "op": "hello"})["ok"] is True
+            assert exchange(conn, {"id": "1", "op": "hello", "protocol": 1})["ok"] is True
 
 
 def test_socket_directory_and_file_modes(tmp_path: Path) -> None:
@@ -367,7 +245,7 @@ def test_sigkill_then_restart_on_the_same_socket(tmp_path: Path) -> None:
         epoch_after = second.wait_ready()
         assert epoch_after != epoch_before
         with connect(second.socket_path) as conn:
-            assert exchange(conn, {"id": "1", "op": "hello"})["result"]["epoch"] == epoch_after
+            assert exchange(conn, {"id": "1", "op": "hello", "protocol": 1})["result"]["epoch"] == epoch_after
     finally:
         second.close()
 
@@ -382,7 +260,7 @@ def test_sigterm_with_a_hung_client_exits_cleanly(tmp_path: Path) -> None:
             # Serial by design: nobody else is served while this client holds the slot.
             blocked = connect(running.socket_path)
             blocked.settimeout(QUIET_TIMEOUT_S)
-            send(blocked, {"id": "b", "op": "hello"})
+            send(blocked, {"id": "b", "op": "hello", "protocol": 1})
             with pytest.raises(socket.timeout):
                 blocked.recv(65536)
             blocked.close()
@@ -408,7 +286,7 @@ def test_deeply_nested_json_does_not_kill_the_server(server: Server) -> None:
         assert reply["error"]["code"] in {"bad_json", "bad_request"}
         assert reply["id"] is None
 
-        after = exchange(conn, {"id": "1", "op": "hello"})
+        after = exchange(conn, {"id": "1", "op": "hello", "protocol": 1})
         assert after["ok"] is True
         assert after["result"]["epoch"] == epoch
 
@@ -423,7 +301,7 @@ def test_nesting_past_the_interpreter_limit_is_bad_json(server: Server) -> None:
         assert reply["error"]["code"] == "bad_json"
         assert "RecursionError" in reply["error"]["message"]
 
-        after = exchange(conn, {"id": "1", "op": "hello"})
+        after = exchange(conn, {"id": "1", "op": "hello", "protocol": 1})
         assert after["ok"] is True
         assert after["result"]["epoch"] == epoch
 
@@ -438,7 +316,7 @@ def test_integer_literal_past_the_conversion_limit_is_bad_json(server: Server) -
         assert reply["error"]["code"] == "bad_json"
         assert reply["id"] is None
 
-        after = exchange(conn, {"id": "1", "op": "hello"})
+        after = exchange(conn, {"id": "1", "op": "hello", "protocol": 1})
         assert after["ok"] is True
         assert after["result"]["epoch"] == epoch
 
@@ -454,7 +332,7 @@ def test_oversized_line_with_newline_in_the_same_chunk(tmp_path: Path) -> None:
             assert reply["error"]["code"] == "request_too_large"
 
         with connect(running.socket_path) as conn:
-            assert exchange(conn, {"id": "1", "op": "hello"})["ok"] is True
+            assert exchange(conn, {"id": "1", "op": "hello", "protocol": 1})["ok"] is True
 
 
 def test_peer_credentials_are_enforced(tmp_path: Path) -> None:
@@ -536,4 +414,4 @@ def test_live_server_is_not_replaced(tmp_path: Path) -> None:
             second.close()
         # The first server is untouched and still answers.
         with connect(running.socket_path) as conn:
-            assert exchange(conn, {"id": "1", "op": "hello"})["ok"] is True
+            assert exchange(conn, {"id": "1", "op": "hello", "protocol": 1})["ok"] is True
