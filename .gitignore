@@ -10,3 +10,4 @@ dist/
 # Runtime leftovers of a local run
 *.sock
 *.sock.stderr
+CODEBUDDY.local.md

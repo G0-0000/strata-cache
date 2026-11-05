@@ -16,6 +16,12 @@ The plugin never parses an artifact. A `.sess`, `.meta`, `.dlog`, `.dchain` or
 `.tokens.json` file is a name and a size here; the bytes belong to the engine
 and go straight between the engine and the filesystem.
 
+## Project docs
+
+- [AGENTS.md](AGENTS.md) — boundaries, layout, how to run tests
+- [PROTOCOL.md](PROTOCOL.md) — wire protocol v1
+- [GLOSSARY.md](GLOSSARY.md) — standard cache terms
+
 ## Vocabulary
 
 The cache terms used by this project are defined in [GLOSSARY.md](GLOSSARY.md).
