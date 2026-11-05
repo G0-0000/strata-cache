@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "strata-cache-plugin"
+name = "strata-cache"
 version = "0.1.0"
-description = "External cache plugin for Strata - read-only shadow and v1 store service"
+description = "External cache service for Strata - read-only shadow and v1 store"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
@@ -19,7 +19,7 @@ classifiers = [
 dev = ["pytest>=8"]
 
 [project.scripts]
-strata-cache-plugin = "strata_cache_plugin.cli:main"
+strata-cache = "strata_cache.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

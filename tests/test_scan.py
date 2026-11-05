@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from strata_cache_plugin import cli, scan
+from strata_cache import cli, scan
 
 ARTIFACTS = {
     "alpha.sess": b"a" * 10,
@@ -190,7 +190,7 @@ def test_bad_depth_raises(tmp_path: Path) -> None:
         ("/home/g0/strata", True),
         ("/home/g0/strata-v100", True),
         ("/home/g0/strata-v100/src/strata.hpp", True),
-        ("/home/g0/strata-cache-plugin/tests", True),
+        ("/home/g0/strata-cache/tests", True),
         ("/home/g0/strataX", True),
         ("/home/g0/other-repo", False),
     ],

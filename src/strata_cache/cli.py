@@ -1,4 +1,4 @@
-"""Command line: ``strata-cache-plugin {scan,dry-run,serve}``.
+"""Command line: ``strata-cache {scan,dry-run,serve}``.
 
 ``scan`` and ``dry-run`` are read-only and never touch a file: ``scan`` refuses
 the protected cache root unless the caller opts in, and even then it only
@@ -27,7 +27,7 @@ class CliError(RuntimeError):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="strata-cache-plugin",
+        prog="strata-cache",
         description=(
             "External cache plugin for Strata."
             " It reports what a cache directory holds, predicts what an eviction"
@@ -197,7 +197,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         else ""
     )
     print(
-        f"starting strata-cache-plugin {__version__} protocol {PROTOCOL_VERSION}"
+        f"starting strata-cache {__version__} protocol {PROTOCOL_VERSION}"
         f" on {server.socket_path} epoch={server.epoch}{store_note}",
         file=sys.stderr,
         flush=True,

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from strata_cache_plugin import cli, socket_server
+from strata_cache import cli, socket_server
 
 from support import (  # noqa: E402 - plain module next to this test file
     READY_TIMEOUT_S,
@@ -354,7 +354,7 @@ def test_socket_path_in_a_protected_root_is_refused(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     for path in (
-        "/models/strata-cache-plugin/cache.sock",
+        "/models/strata-cache/cache.sock",
         "/home/g0/strata-v100/run/cache.sock",
     ):
         server = socket_server.SocketServer(path)  # constructing touches nothing

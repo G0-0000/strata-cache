@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from strata_cache_plugin import policy
+from strata_cache import policy
 
 BPT = 100  # bytes per token in every test below: tokens == hundreds of bytes
 

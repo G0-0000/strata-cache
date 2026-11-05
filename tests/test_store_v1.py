@@ -16,7 +16,7 @@ from typing import Iterator
 import pytest
 
 from support import FdClient, Server, free_socket_dir, private_dir
-from strata_cache_plugin import store_v1
+from strata_cache import store_v1
 
 
 def artifacts(root: Path) -> list[str]:
@@ -369,7 +369,7 @@ def test_store_operations_need_a_store(tmp_path: Path) -> None:
 
 def test_a_state_root_inside_a_protected_root_is_refused(tmp_path: Path) -> None:
     with pytest.raises(store_v1.StoreError, match="protected root"):
-        store_v1.Store("/models/strata-cache-plugin").prepare()
+        store_v1.Store("/models/strata-cache").prepare()
     with pytest.raises(store_v1.StoreError, match="protected root"):
         store_v1.Store("/home/g0/strata-v100/cache").prepare()
 

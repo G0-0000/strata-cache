@@ -62,7 +62,7 @@ class Server:
             [
                 sys.executable,
                 "-m",
-                "strata_cache_plugin.cli",
+                "strata_cache.cli",
                 "serve",
                 "--socket",
                 str(self.socket_path),

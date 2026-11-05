@@ -457,7 +457,7 @@ class SocketServer:
             return
         self._warned_ignored = True
         print(
-            f"strata-cache-plugin: ignored a notification (op {op}): {why};"
+            f"strata-cache: ignored a notification (op {op}): {why};"
             " further ignored notifications are counted only",
             file=sys.stderr,
             flush=True,

@@ -1,4 +1,4 @@
-# strata-cache-plugin
+# strata-cache
 
 An external cache plugin for Strata, grown outwards from the engine. This
 repository holds **P1, a read-only shadow**, and **v1, the store service**: the
@@ -166,14 +166,14 @@ one of those rules, and the reply says how much it left behind (`bytes`,
 ## Layout
 
 ```
-src/strata_cache_plugin/scan.py           directory scanner (stat only)
-src/strata_cache_plugin/policy.py         dry-run eviction policy (pure)
-src/strata_cache_plugin/store_v1.py       leases, notifications, staged writes, eviction
-src/strata_cache_plugin/socket_server.py  Unix socket server
-src/strata_cache_plugin/cli.py            scan / dry-run / serve
-tests/                                     scanner, policy, socket, store, notification and kill tests
-systemd/strata-cache-plugin.service        user unit, placeholder ExecStart
-PROTOCOL.md                                wire protocol v1
+src/strata_cache/scan.py           directory scanner (stat only)
+src/strata_cache/policy.py         dry-run eviction policy (pure)
+src/strata_cache/store_v1.py       leases, notifications, staged writes, eviction
+src/strata_cache/socket_server.py  Unix socket server
+src/strata_cache/cli.py            scan / dry-run / serve
+tests/                             scanner, policy, socket, store, notification and kill tests
+systemd/strata-cache.service       user unit, placeholder ExecStart
+PROTOCOL.md                        wire protocol v1
 ```
 
 ## Install and run
@@ -184,15 +184,15 @@ is used for the tests.
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e .
-.venv/bin/strata-cache-plugin --help
+.venv/bin/strata-cache --help
 ```
 
 ### scan
 
 ```sh
-strata-cache-plugin scan --dir /path/to/cache          # aggregate table
-strata-cache-plugin scan --dir /path/to/cache --json   # aggregates plus every entry
-strata-cache-plugin scan --dir /path/to/cache --max-depth 2
+strata-cache scan --dir /path/to/cache          # aggregate table
+strata-cache scan --dir /path/to/cache --json   # aggregates plus every entry
+strata-cache scan --dir /path/to/cache --max-depth 2
 ```
 
 The protected roots (`/models`, `/home/g0/strata*`) are refused without
@@ -211,9 +211,9 @@ The fixture is a JSON array of descriptors; `name` is the only required field:
 ```
 
 ```sh
-strata-cache-plugin dry-run --fixture entries.json --budget-bytes 400000000
-strata-cache-plugin dry-run --fixture entries.json --budget-bytes 400000000 --fifo
-strata-cache-plugin dry-run --fixture entries.json --budget-bytes 400000000 --slots 12 --json
+strata-cache dry-run --fixture entries.json --budget-bytes 400000000
+strata-cache dry-run --fixture entries.json --budget-bytes 400000000 --fifo
+strata-cache dry-run --fixture entries.json --budget-bytes 400000000 --slots 12 --json
 ```
 
 Rules, mirroring the engine:
@@ -241,8 +241,8 @@ given. A `--fifo` victim list can therefore differ from the engine's. Delta mode
 ### serve
 
 ```sh
-strata-cache-plugin serve --socket /run/user/$(id -u)/strata-cache-plugin/cache.sock
-strata-cache-plugin serve --socket ... --disk-dir /var/lib/strata-cache \
+strata-cache serve --socket /run/user/$(id -u)/strata-cache/cache.sock
+strata-cache serve --socket ... --disk-dir /var/lib/strata-cache \
     --slot-dir /var/lib/strata-slots --lease-ttl-s 120 --grace-s 300
 ```
 

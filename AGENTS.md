@@ -1,4 +1,4 @@
-# AGENTS.md — strata-cache-plugin
+# AGENTS.md — strata-cache
 
 External cache plugin for Strata. It owns where cached conversations live and how long they stay,
 while the engine keeps every byte of the snapshot format, identity and matching. The plugin never
@@ -18,7 +18,7 @@ reads or parses .sess/.meta/.dlog/.dchain contents.
 
 ## Layout
 
-- `src/strata_cache_plugin/` — `cli.py`, `scan.py`, `policy.py`, `socket_server.py`, `store_v1.py`
+- `src/strata_cache/` — `cli.py`, `scan.py`, `policy.py`, `socket_server.py`, `store_v1.py`
 - `tests/` — pytest; scanner, policy, socket, notifications, store
 - `systemd/` — example user unit, not enabled
 - `PROTOCOL.md` — wire protocol v1 (requests with id get replies; notifications have no id and no reply)
