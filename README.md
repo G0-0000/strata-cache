@@ -335,3 +335,7 @@ while an append to a slot-only name is a miss.
 - The cost model is a constant, not a measurement.
 - `--fifo` order does not model the engine's skip of complete entries that
   already have a chain, so its victims can differ; see the dry-run section.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
