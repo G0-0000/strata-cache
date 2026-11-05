@@ -54,7 +54,7 @@ LEASE_TTL_S = 120.0
 GRACE_S = 300.0
 
 #: What a line without an id may ask for. Nothing else is a notification.
-NOTIFICATION_OPS = ("lease", "unlease", "touch", "set_pin")
+NOTIFICATION_OPS = ("lease", "unlease", "touch", "set_pin", "remove")
 
 #: Staged temporary: ".<name>.stage-<token>". Never listed, never served.
 STAGE_INFIX = ".stage-"
@@ -325,6 +325,11 @@ class Store:
             clean = validate_name(name)
         except InvalidRequest:
             return False
+        # A count nobody refreshed has already lapsed, whatever this line says about
+        # the same name: apply the line to the records that are still live. Without
+        # the sweep a lease would grow a record that had lapsed and an unlease would
+        # refresh one, and the name would be held by holds that are not there.
+        self.expire_notifications()
         now = self._clock()
         if op == "lease":
             record = self._notified.get(clean)
@@ -352,6 +357,13 @@ class Store:
                 self._pins.add(clean)
             else:
                 self._pins.discard(clean)
+            self.counters["notifications_applied"] += 1
+            return True
+        elif op == "remove":
+            # The engine deleted the name: every record this store keeps of it goes.
+            # A name this plugin never heard of is not a failure - the removal is the
+            # engine's, and the state the plugin would have dropped is already absent.
+            self._forget(clean)
             self.counters["notifications_applied"] += 1
             return True
         else:
@@ -468,25 +480,38 @@ class Store:
         return name in self._pins
 
     def remove(self, name: object) -> bool:
-        """Delete name unless a lease holds it. Never touches a temporary."""
+        """Delete name unless a lease or a notification count holds it.
+
+        A request, so the caller gets an answer: a hold that has already lapsed is
+        swept before the answer is given, and only a live wire lease or a live
+        notification count is worth a busy. A temporary is never touched.
+        """
         clean = validate_name(name)
-        self.expire()
-        if self._leases.get(clean):
+        leases = self.leases_on(clean)
+        notified = self.notified_leases(clean)
+        if leases or notified:
             self.counters["removes_refused"] += 1
-            raise BusyArtifact(
-                f"{clean} has {len(self._leases[clean])} live lease(s); release them first"
-            )
+            held: list[str] = []
+            if leases:
+                held.append(f"{leases} live lease(s)")
+            if notified:
+                held.append(f"{notified} live notification count(s)")
+            raise BusyArtifact(f"{clean} has {' and '.join(held)}; release them first")
         try:
             os.unlink(self.path_of(clean))
         except FileNotFoundError:
             return False
         except OSError as exc:
             raise StoreIOError(f"cannot remove {clean}: {exc.strerror or exc}") from exc
-        self._pins.discard(clean)
-        self._notified.pop(clean, None)
-        self._last_used.pop(clean, None)
+        self._forget(clean)
         self.counters["removes_total"] += 1
         return True
+
+    def _forget(self, name: str) -> None:
+        """Drop every record this store keeps of one name: pin, count and last_used."""
+        self._pins.discard(name)
+        self._notified.pop(name, None)
+        self._last_used.pop(name, None)
 
     # -------------------------------------------------------------- writes
 
@@ -684,9 +709,7 @@ class Store:
                 continue
             except OSError as exc:
                 raise StoreIOError(f"cannot remove {name}: {exc.strerror or exc}") from exc
-            self._pins.discard(name)
-            self._notified.pop(name, None)
-            self._last_used.pop(name, None)
+            self._forget(name)
             removed.append(name)
             freed += size
             held -= size

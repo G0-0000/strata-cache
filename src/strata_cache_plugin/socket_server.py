@@ -4,10 +4,11 @@ See PROTOCOL.md for the wire format (v1). Every connection is served from a
 single accept loop on purpose: the protocol is serial by design, and a hung
 client blocks the queue until it is killed - a known, documented limit.
 
-A line without an "id" is a notification: lease, unlease, touch or set_pin,
-applied and never answered. A line with an "id" is a request and gets exactly
-one reply. Both kinds share one connection and one serial loop, so the engine
-can interleave a notification with its own reads without a second socket.
+A line without an "id" is a notification: lease, unlease, touch, set_pin or
+remove, applied and never answered. A line with an "id" is a request and gets
+exactly one reply. Both kinds share one connection and one serial loop, so the
+engine can interleave a notification with its own reads without a second
+socket.
 
 Snapshot bytes never cross this socket. Requests name files and carry numbers;
 the only thing that crosses besides JSON is one descriptor per reply, attached
@@ -22,6 +23,7 @@ import signal
 import socket
 import stat as stat_mod
 import struct
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -178,6 +180,10 @@ class SocketServer:
         }
         self._requests_by_op: dict[str, int] = {}
         self._notifications_by_op: dict[str, int] = {}
+        #: op -> how many notifications of that op were not applied.
+        self._ignored_by_op: dict[str, int] = {}
+        #: The first ignored notification is written to stderr; the rest are counted.
+        self._warned_ignored = False
 
     # ------------------------------------------------------------------ setup
 
@@ -414,26 +420,48 @@ class SocketServer:
 
         The engine sends these with a single non-blocking send() and reads
         nothing back, so a notification that is malformed, duplicated, dropped
-        on the way or sent to a server with no store is only counted. Nothing
-        here may raise and nothing may write to the connection.
+        on the way or sent to a server with no store is counted, never answered:
+        the sender cannot be told, so the first one of the run goes to stderr and
+        the rest only to stats. Nothing here may raise and nothing may write to
+        the connection.
         """
         self._counters["notifications_total"] += 1
         op = request.get("op")
         if not isinstance(op, str) or not op:
-            self._counters["notifications_ignored"] += 1
+            self._ignore_notification("(none)", "op must be a non-empty string")
             return
         self._notifications_by_op[op] = self._notifications_by_op.get(op, 0) + 1
         if self.store is None:
             # No store: there is no state to keep, and nobody to tell.
-            self._counters["notifications_ignored"] += 1
+            self._ignore_notification(op, "this server has no store")
             return
         try:
             applied = self.store.notify(op, request.get("name"), request.get("on"))
-        except Exception:  # noqa: BLE001 - a notification is never worth a crash
-            self._counters["notifications_ignored"] += 1
+        except Exception as exc:  # noqa: BLE001 - a notification is never worth a crash
+            self._ignore_notification(op, f"the store raised {type(exc).__name__}: {exc}")
             return
         if not applied:
-            self._counters["notifications_ignored"] += 1
+            self._ignore_notification(op, "the store refused the line")
+
+    def _ignore_notification(self, op: str, why: str) -> None:
+        """Count one notification that was not applied, and say so once for the run.
+
+        A notification is never answered, so its sender cannot learn that the
+        plugin dropped it: the first one of a run is written to stderr - the same
+        thing the engine does with a line its socket would not take - and every one
+        is counted, so an operator sees a pattern without the log filling up.
+        """
+        self._counters["notifications_ignored"] += 1
+        self._ignored_by_op[op] = self._ignored_by_op.get(op, 0) + 1
+        if self._warned_ignored:
+            return
+        self._warned_ignored = True
+        print(
+            f"strata-cache-plugin: ignored a notification (op {op}): {why};"
+            " further ignored notifications are counted only",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def handle_request(self, request: Mapping[str, Any]) -> Reply:
         """Dispatch one decoded request. Counters are updated here."""
@@ -528,17 +556,23 @@ class SocketServer:
     # ---------------------------------------------------------- operations
 
     def _reply_hello(self, request_id: str, request: Mapping[str, Any]) -> Reply:
-        """Handshake. A foreign protocol version is refused and the connection closed."""
+        """Handshake. Anything but this server's protocol is refused, and the connection closed.
+
+        A missing protocol is refused the same way as a foreign one: a client
+        that does not say which protocol it speaks is a v0 client or a broken
+        one, and answering bad_request would leave it on a connection whose
+        later lines are not the ones it knows how to write.
+        """
         protocol = request.get("protocol")
-        if isinstance(protocol, bool) or not isinstance(protocol, int):
-            return self._error_reply(
-                request_id, ERROR_BAD_REQUEST, "hello requires an integer protocol"
-            )
-        if protocol != PROTOCOL_VERSION:
+        if (
+            isinstance(protocol, bool)
+            or not isinstance(protocol, int)
+            or protocol != PROTOCOL_VERSION
+        ):
             return self._error_reply(
                 request_id,
                 ERROR_NOT_IMPLEMENTED,
-                f"protocol {protocol} is not supported;"
+                f"protocol {protocol!r} is not supported;"
                 f" this server speaks protocol {PROTOCOL_VERSION}",
                 close=True,
             )
@@ -610,6 +644,7 @@ class SocketServer:
             "peer_rejections_total": self._counters["peer_rejections_total"],
             "requests_by_op": dict(self._requests_by_op),
             "notifications_by_op": dict(self._notifications_by_op),
+            "notifications_ignored_by_op": dict(self._ignored_by_op),
             "allow_production_readonly": self.allow_production_readonly,
         }
         snapshot.update(store_stats)

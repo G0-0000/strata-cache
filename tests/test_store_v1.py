@@ -49,7 +49,7 @@ def test_hello_reports_protocol_one_and_the_directories(
         assert result["protocol"] == 1
         assert result["disk_dir"] == str(store_root)
         assert result["slot_dir"] is None
-        assert result["notifications"] == ["lease", "unlease", "touch", "set_pin"]
+        assert result["notifications"] == ["lease", "unlease", "touch", "set_pin", "remove"]
         for feature in (
             "lease_read",
             "stage_write",
@@ -70,6 +70,21 @@ def test_a_foreign_protocol_is_refused_and_the_connection_closed(server: Server)
         assert reply["error"]["code"] == "not_implemented"
         assert client.conn.recv(65536) == b""  # the server hung up
         client.epoch = None
+
+
+def test_hello_without_a_protocol_is_refused_and_the_connection_closed(server: Server) -> None:
+    """A v0 client says nothing about its protocol: refuse it, do not answer bad_request."""
+    with FdClient(server.socket_path) as client:
+        reply, fd = client.call("hello")
+        assert fd is None
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == "not_implemented"
+        assert "None" in reply["error"]["message"]
+        assert client.conn.recv(65536) == b""  # the server hung up
+        client.epoch = None
+    # the server itself is fine: a client that speaks protocol 1 is served
+    with FdClient(server.socket_path) as client:
+        assert client.hello()["protocol"] == 1
 
 
 def test_lease_read_hands_over_a_readable_descriptor(server: Server, store_root: Path) -> None:

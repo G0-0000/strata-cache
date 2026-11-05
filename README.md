@@ -62,7 +62,7 @@ removes from but never writes to.
 | `abort_write` | unlink the temporary; never touches `name` | no |
 | `touch` | refresh the leases on a name | no |
 | `set_pin` | record or clear a pin | no |
-| `remove` | delete a name, refused with `busy` while a lease is live | no |
+| `remove` | delete a name, refused with `busy` while a live lease or count holds it | no |
 | `stat` | does the name exist, and how big is it | no |
 | `list` | every regular artifact, with sizes; temporaries never listed | no |
 | `evict` | delete least-recently-used artifacts down to `budget_bytes`, inside the grace period | no |
@@ -72,25 +72,30 @@ own copy immediately after the send; the engine reads or writes the file itself.
 
 ## Notification mode
 
-A line without an `id` is a notification. The engine sends four, one
+A line without an `id` is a notification. The engine sends five, one
 non-blocking `send()` each, and reads nothing back:
 
     {"op":"lease","name":"strata-conv-3.sess"}
     {"op":"unlease","name":"strata-conv-3.sess"}
     {"op":"touch","name":"strata-conv-3.sess"}
     {"op":"set_pin","name":"strata-conv-3.sess","on":true}
+    {"op":"remove","name":"strata-conv-3.sess"}
 
 The plugin applies each one - `lease`/`unlease` keep a reference count per
 name with the lease TTL (120 s), `touch` records that the name was just used,
 `set_pin` records or clears the pin - and never writes a reply, not even an
 error. Lease, unlease and touch are activity and restart the entry's grace
-period; a pin is only a retention instruction and does not.
+period; a pin is only a retention instruction and does not. `remove` is the
+engine saying it deleted the name, so the plugin drops that name's count, pin
+and last_used record; a name it never heard of is applied all the same.
 
 Requests with an `id` keep the request/reply behaviour, on the same connection
 and in the same serial loop. A notification that is malformed, that names
 something outside the name rule, or that arrives at a server started without
-`--disk-dir` is counted (`notifications_ignored`) and dropped. A line left
-half-written when a connection ends is discarded rather than applied.
+`--disk-dir` is counted (`notifications_ignored`, by op in
+`notifications_ignored_by_op`) and has no reply; the first one of the run is
+written to stderr, since its sender cannot be told. A line left half-written
+when a connection ends is discarded rather than applied.
 
 **Notifications may be dropped.** The engine does not retry: a line the socket
 will not take whole is gone, so a missing `unlease` or a missing `lease` is a
@@ -130,7 +135,10 @@ one of those rules, and the reply says how much it left behind (`bytes`,
   directory; temporary files are reported and left alone. v1 writes, but only
   inside its own `--disk-dir` and only when a request names a file:
   `stage_write`, `stage_append`, `commit_write`, `abort_write`, `remove` and
-  `evict`. `--slot-dir` is never written to.
+  `evict`. The slot directory is never written to - no write, no temporary, no
+  rename lands there - but its entries are listed and can be deleted by
+  `remove` or `evict` under the same pin, lease and grace rules as the disk
+  directory.
 - It does not read snapshot bytes, over the socket or anywhere else. Byte
   transfer is not part of the protocol: a descriptor is a handle, and the bytes
   move between the engine and the filesystem without entering this process.
@@ -243,10 +251,11 @@ protected root. Without it the server still scans, dry-runs and reports stats,
 but the v1 store operations answer `not_implemented` and every notification is
 counted and dropped.
 
-`--slot-dir` names a second directory the store also lists, stats and removes
-from - session files, which the plugin never writes and never parses. It is
-prepared the same way as `--disk-dir`. A name that exists in both resolves to
-`--disk-dir`.
+`--slot-dir` names a second directory the store also lists, stats and deletes
+from - session files, which the plugin never writes and never parses. Its
+entries are evicted under the same pin, lease and grace rules as the disk
+directory; what the plugin never does is write there. It is prepared the same
+way as `--disk-dir`. A name that exists in both resolves to `--disk-dir`.
 
 `--lease-ttl-s` sets the lease lifetime (default 120 s) and the lifetime of a
 notification count. `--grace-s` sets how long an entry with no known lease is
@@ -297,9 +306,10 @@ not two; a count nobody refreshed lapses after the TTL; `touch` restarts the
 grace period; a pin holds an entry through `evict`; a dropped notification -
 one that is simply never sent - still leaves the entry inside the grace period;
 an old entry outside it is evicted while a fresh one is kept; ignored
-notifications are counted and harmless; notifications to a server without
-`--disk-dir` are ignored; and `--slot-dir` is listed and evictable while an
-append to a slot-only name is a miss.
+notifications are counted, the first one logged and all harmless; notifications
+to a server without `--disk-dir` are ignored; a `remove` notification drops a
+name's counts, pin and last_used; and `--slot-dir` is listed and evictable
+while an append to a slot-only name is a miss.
 
 ## Limits, on purpose
 

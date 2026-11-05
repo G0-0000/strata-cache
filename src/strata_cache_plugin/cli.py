@@ -123,7 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--slot-dir",
         default=None,
         help="optional second directory (session files) the store also lists,"
-        " stats and removes; it is never written to",
+        " stats and deletes from under the same pin/lease/grace rules; it is"
+        " never written to",
     )
     serve_parser.add_argument(
         "--lease-ttl-s",

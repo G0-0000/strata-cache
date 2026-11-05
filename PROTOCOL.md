@@ -83,6 +83,7 @@ line is dropped.
     {"op":"unlease","name":"strata-conv-3.sess"}
     {"op":"touch","name":"strata-conv-3.sess"}
     {"op":"set_pin","name":"strata-conv-3.sess","on":true}
+    {"op":"remove","name":"strata-conv-3.sess"}
 
 | op | what the plugin records |
 |----|-------------------------|
@@ -90,6 +91,12 @@ line is dropped.
 | unlease | one holder fewer; the name is free once the count reaches zero |
 | touch | the name was just used |
 | set_pin | pinned (`on:true`) or no longer pinned (`on:false`) |
+| remove | the engine deleted the name: its counts, its pin and its last_used go |
+
+The engine sends remove once, after its own store has deleted the name, so a
+plugin that keeps an index does not go on holding a record of a file that is
+no longer there. A remove for a name the plugin never heard of is applied, not
+refused: the state it would have dropped is already absent.
 
 - **Never answered.** Nothing follows a notification, not even an error. A
   request sent without an id is therefore indistinguishable from a
@@ -101,9 +108,11 @@ line is dropped.
   plugin has to discard.
 - **No epoch.** A notification is never refused for a stale owner. It adds or
   refreshes a record, and a record a stale engine created lapses on its TTL.
-- **Never read as absence.** The plugin only ever adds state here and lets it
-  expire. A missing unlease does not prove the engine is done with an entry;
-  that is what the grace period is for. The lease count carries the wire lease
+- **Never read as absence, except remove.** A lease, an unlease or a touch
+  only ever adds state or refreshes it, and a missing unlease does not prove the
+  engine is done with an entry - that is what the grace period is for. remove is
+  not an absence: it is the engine saying it deleted the name, so it is the one
+  notification that drops records. The lease count carries the wire lease
   TTL (120 s), and lease, unlease and touch each restart it, so a dropped
   unlease costs retention, never a live read.
 - **Lease, unlease and touch are activity; a pin is not.** Each of the three
@@ -115,10 +124,12 @@ line is dropped.
 - **A pin may precede the file.** `set_pin` records the pin whether or not the
   entry exists, because a notification cannot be asked to try again. The
   request form of `set_pin` on a missing name still answers `miss`.
-- **Ignoring is silent by construction.** A notification with no name, an
-  unknown op, or a non-boolean `on` is counted and dropped. `stats` reports
-  `notifications_total`, `notifications_ignored`, `notifications_by_op` and
-  `notified_leases_live`.
+- **An ignored notification is counted, and the first one is reported.** A
+  notification with no name, an unknown op or a non-boolean `on` cannot be
+  answered - there is no reply channel - so the plugin writes the first one of
+  the run to stderr and counts every one. `stats` reports
+  `notifications_total`, `notifications_ignored`, `notifications_ignored_by_op`,
+  `notifications_by_op` and `notified_leases_live`.
 
 ## Leases
 
@@ -192,9 +203,11 @@ in_grace).
 ## State
 
 - The plugin owns two directories: --disk-dir holds the spill artifacts,
-  --slot-dir (optional) holds session files. It lists, stats, removes and
-  tracks names in both; it writes only in the disk directory and parses
-  neither. A name present in both resolves to the disk directory.
+  --slot-dir (optional) holds session files. It never writes in the slot
+  directory - every write lands in the disk directory - but it lists, stats,
+  removes and tracks names in both, so a slot entry can be evicted under the
+  same pin, lease and grace rules as a disk one. A name present in both
+  resolves to the disk directory.
 - It also owns the lease table, the notification counts, the write-token table,
   the pin set, one last_used record per name, and counters. All of it lives in
   memory and dies with the process; last_used falls back to the file's mtime.
@@ -206,8 +219,9 @@ in_grace).
 ## Handshake and versioning
 
 hello must be the first request. protocol is an integer; this document is
-protocol 1. A mismatch is refused with not_implemented and the connection is
-closed. epoch is generated at start and never reused; every request except
+protocol 1. A missing protocol, a non-integer one and a mismatch are all refused
+with not_implemented and the connection is closed: a client that does not say
+which protocol it speaks cannot be trusted with the rest of the line format. epoch is generated at start and never reused; every request except
 hello must carry the current epoch. A notification may arrive before hello and
 between requests: it carries no epoch, so there is nothing for it to be refused
 for.

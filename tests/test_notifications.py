@@ -344,7 +344,7 @@ def test_evict_needs_a_budget_and_an_epoch(tmp_path: Path, disk_dir: Path) -> No
             assert no_epoch["error"]["code"] == "epoch_mismatch"
 
 
-def test_the_slot_directory_is_listed_but_never_written(
+def test_the_slot_directory_is_listed_and_evictable_but_never_written_to(
     tmp_path: Path, disk_dir: Path, slot_dir: Path
 ) -> None:
     (slot_dir / "session.bin").write_bytes(b"session")
@@ -400,3 +400,132 @@ def test_the_slot_directory_is_listed_but_never_written(
             evicted, _ = client.call("evict", budget_bytes=0)
             assert sorted(evicted["result"]["removed"]) == ["both.sess", "session.bin", "spill.sess"]
             assert (slot_dir / "session.bin").exists() is False
+
+
+def test_a_remove_notification_drops_the_entry_and_its_records(
+    tmp_path: Path, disk_dir: Path
+) -> None:
+    """The engine deleted the name: its count, its pin and its last_used go with it."""
+    (disk_dir / "gone.sess").write_bytes(b"gone")
+    age(disk_dir / "gone.sess")  # an old file, so only the plugin's own records could spare it
+    with Server(
+        free_socket_dir(tmp_path),
+        "--disk-dir",
+        str(disk_dir),
+        "--grace-s",
+        "0.3",
+        "--lease-ttl-s",
+        "60",
+    ) as running:
+        epoch = running.wait_ready()
+        with connect(running.socket_path) as conn:
+            notify(conn, "lease", "gone.sess")
+            notify(conn, "lease", "gone.sess")
+            notify(conn, "set_pin", "gone.sess", on=True)
+            notify(conn, "touch", "gone.sess")  # last_used is now, inside the grace period
+            held = stats(conn, epoch)
+            assert held["notified_leases_live"] == 2
+            assert held["pins"] == 1
+            kept = exchange(conn, {"id": "e", "op": "evict", "epoch": epoch, "budget_bytes": 0})
+            assert kept["result"]["removed"] == []
+            assert kept["result"]["skipped"]["pinned"] == 1
+
+            notify(conn, "remove", "gone.sess")
+            dropped = stats(conn, epoch)
+            assert dropped["notified_leases_live"] == 0
+            assert dropped["pins"] == 0
+            assert dropped["notifications_applied"] == 5
+            # nothing of the plugin's holds the name any more, and its last_used is the old mtime
+            gone = exchange(conn, {"id": "e2", "op": "evict", "epoch": epoch, "budget_bytes": 0})
+            assert gone["result"]["removed"] == ["gone.sess"]
+        assert (disk_dir / "gone.sess").exists() is False
+
+
+def test_a_remove_notification_for_an_unknown_name_is_applied(
+    tmp_path: Path, disk_dir: Path
+) -> None:
+    """A name the plugin never heard of: there is nothing to drop, and no failure."""
+    with Server(free_socket_dir(tmp_path), "--disk-dir", str(disk_dir)) as running:
+        epoch = running.wait_ready()
+        with connect(running.socket_path) as conn:
+            notify(conn, "remove", "never-heard-of.sess")
+            result = stats(conn, epoch)
+            assert result["notifications_total"] == 1
+            assert result["notifications_applied"] == 1
+            assert result["notifications_ignored"] == 0
+            assert result["notified_leases_live"] == 0
+
+
+def test_remove_is_refused_while_a_notification_count_holds_the_name(
+    tmp_path: Path, disk_dir: Path
+) -> None:
+    """A request keeps its answer: a live count is a hold, exactly like a wire lease."""
+    (disk_dir / "held.sess").write_bytes(b"held")
+    with Server(
+        free_socket_dir(tmp_path), "--disk-dir", str(disk_dir), "--lease-ttl-s", "60"
+    ) as running:
+        epoch = running.wait_ready()
+        with connect(running.socket_path) as conn:
+            notify(conn, "lease", "held.sess")
+            refused = exchange(conn, {"id": "r", "op": "remove", "epoch": epoch, "name": "held.sess"})
+            assert refused["error"]["code"] == "busy"
+            assert "notification count" in refused["error"]["message"]
+            assert (disk_dir / "held.sess").read_bytes() == b"held"
+            assert stats(conn, epoch)["removes_refused"] == 1
+
+            notify(conn, "unlease", "held.sess")
+            allowed = exchange(conn, {"id": "r2", "op": "remove", "epoch": epoch, "name": "held.sess"})
+            assert allowed["result"]["removed"] is True
+        assert (disk_dir / "held.sess").exists() is False
+
+
+def test_remove_sweeps_a_count_that_has_already_lapsed(tmp_path: Path, disk_dir: Path) -> None:
+    """A hold nobody refreshed is not a hold: the request is answered, not refused."""
+    (disk_dir / "lapsed.sess").write_bytes(b"lapsed")
+    with Server(
+        free_socket_dir(tmp_path), "--disk-dir", str(disk_dir), "--lease-ttl-s", "0.2"
+    ) as running:
+        epoch = running.wait_ready()
+        with connect(running.socket_path) as conn:
+            notify(conn, "lease", "lapsed.sess")
+            time.sleep(0.45)  # past the TTL
+            removed = exchange(
+                conn, {"id": "r", "op": "remove", "epoch": epoch, "name": "lapsed.sess"}
+            )
+            assert removed["ok"] is True, removed
+            assert removed["result"]["removed"] is True
+            assert stats(conn, epoch)["removes_refused"] == 0
+
+
+def test_a_lapsed_count_neither_grows_nor_comes_back(tmp_path: Path, disk_dir: Path) -> None:
+    """A lease may not add to a record that lapsed, and an unlease may not revive one."""
+    (disk_dir / "counted.sess").write_bytes(b"counted")
+    with Server(
+        free_socket_dir(tmp_path), "--disk-dir", str(disk_dir), "--lease-ttl-s", "0.2"
+    ) as running:
+        epoch = running.wait_ready()
+        with connect(running.socket_path) as conn:
+            notify(conn, "lease", "counted.sess")
+            notify(conn, "lease", "counted.sess")
+            assert stats(conn, epoch)["notified_leases_live"] == 2
+
+            time.sleep(0.45)  # both lapsed
+            notify(conn, "lease", "counted.sess")  # a fresh hold, not a third one
+            assert stats(conn, epoch)["notified_leases_live"] == 1
+            notify(conn, "unlease", "counted.sess")  # releases that one, and nothing else
+            assert stats(conn, epoch)["notified_leases_live"] == 0
+
+
+def test_the_first_ignored_notification_is_logged_once(tmp_path: Path, disk_dir: Path) -> None:
+    """Its sender can never be told, so the plugin says it once in the log."""
+    with Server(free_socket_dir(tmp_path), "--disk-dir", str(disk_dir)) as running:
+        epoch = running.wait_ready()
+        with connect(running.socket_path) as conn:
+            notify(conn, "flush", "a.sess")  # not a notification op
+            notify(conn, "lease", ".hidden.sess")  # outside the name rule
+            result = stats(conn, epoch)
+            assert result["notifications_ignored"] == 2
+            assert result["notifications_ignored_by_op"] == {"flush": 1, "lease": 1}
+        log = running.stderr_text()
+        assert log.count("ignored a notification") == 1
+        assert "flush" in log
